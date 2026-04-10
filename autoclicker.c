@@ -2,6 +2,14 @@
  * Auto Clicker by 22eustachy
  * Compile: gcc autoclicker.c -o autoclicker.exe -lcomctl32 -luser32 -mwindows
  * Requires: MinGW-w64 on Windows
+ *
+ * FIXES (keyboard):
+ *  1. wScan is now filled with MapVirtualKey(vkCode, MAPVK_VK_TO_VSC)
+ *     for both key-down and key-up strokes.
+ *  2. KEYEVENTF_EXTENDEDKEY is set for all keys that need it
+ *     (F-keys, arrows, nav cluster, numpad keys).
+ *  3. Double-press delay for keyboard reduced to 10 ms (was 50 ms).
+ *  4. StartClicking() guards against a separator item being active.
  */
 
 #include <windows.h>
@@ -116,6 +124,32 @@ typedef struct {
 } ClickConfig;
 
 /* ─────────────────────────────────────────────
+   FIX: Returns TRUE for keys that require KEYEVENTF_EXTENDEDKEY.
+   Without this flag the wrong scancode is sent for the nav cluster,
+   arrow keys, and F-keys, and many targets ignore the event entirely.
+   ───────────────────────────────────────────── */
+static BOOL NeedsExtendedKey(WORD vk)
+{
+    switch (vk) {
+        case VK_RMENU: case VK_RCONTROL:
+        case VK_INSERT: case VK_DELETE:
+        case VK_HOME:   case VK_END:
+        case VK_PRIOR:  case VK_NEXT:
+        case VK_UP:     case VK_DOWN:
+        case VK_LEFT:   case VK_RIGHT:
+        case VK_NUMLOCK: case VK_CANCEL:
+        case VK_SNAPSHOT:
+        case VK_DIVIDE:   /* numpad / */
+        case VK_F1:  case VK_F2:  case VK_F3:  case VK_F4:
+        case VK_F5:  case VK_F6:  case VK_F7:  case VK_F8:
+        case VK_F9:  case VK_F10: case VK_F11: case VK_F12:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+/* ─────────────────────────────────────────────
    Send a single click (mouse or key press+release)
    ───────────────────────────────────────────── */
 static void SendOneClick(const ClickConfig *cfg)
@@ -150,17 +184,33 @@ static void SendOneClick(const ClickConfig *cfg)
             n++;
             SendInput(n, inp, sizeof(INPUT));
         } else {
+            /* ── FIX 1: populate wScan so targets that ignore vkCode still work ── */
+            /* ── FIX 2: set KEYEVENTF_EXTENDEDKEY for keys that require it       ── */
+            WORD  vk      = b->vkCode;
+            WORD  scan    = (WORD)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+            DWORD exFlags = NeedsExtendedKey(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
+
             INPUT inp[2];
             memset(inp, 0, sizeof(inp));
-            inp[0].type     = INPUT_KEYBOARD;
-            inp[0].ki.wVk   = b->vkCode;
-            inp[1].type     = INPUT_KEYBOARD;
-            inp[1].ki.wVk   = b->vkCode;
-            inp[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+            /* Key down */
+            inp[0].type           = INPUT_KEYBOARD;
+            inp[0].ki.wVk         = vk;
+            inp[0].ki.wScan       = scan;
+            inp[0].ki.dwFlags     = exFlags;
+
+            /* Key up */
+            inp[1].type           = INPUT_KEYBOARD;
+            inp[1].ki.wVk         = vk;
+            inp[1].ki.wScan       = scan;
+            inp[1].ki.dwFlags     = KEYEVENTF_KEYUP | exFlags;
+
             SendInput(2, inp, sizeof(INPUT));
         }
 
-        if (cfg->isDouble && r == 0) Sleep(50);
+        /* FIX 3: inter-press delay — 10 ms for keys (50 ms was only for mouse) */
+        if (cfg->isDouble && r == 0)
+            Sleep(b->isMouse ? 50 : 10);
     }
 }
 
@@ -264,7 +314,16 @@ static void StartClicking(HWND hwnd)
     HWND hCombo = GetDlgItem(hwnd, IDC_BTN_COMBO);
     int  sel    = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
     int  bidx   = (int)SendMessage(hCombo, CB_GETITEMDATA, sel, 0);
-    cfg->btnIndex = (bidx >= 0) ? bidx : 0;
+
+    /* FIX 4: guard against a separator row being active (e.g. via keyboard nav) */
+    if (bidx < 0) {
+        free(cfg);
+        MessageBoxA(hwnd,
+            "Please select a valid button (not a separator).",
+            "Auto Clicker", MB_ICONWARNING | MB_OK);
+        return;
+    }
+    cfg->btnIndex = bidx;
 
     cfg->isDouble      = (SendMessage(GetDlgItem(hwnd, IDC_TYPE_COMBO),
                                       CB_GETCURSEL, 0, 0) == 1);
@@ -335,7 +394,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
                 68, 108, 150, 220, hwnd, (HMENU)IDC_BTN_COMBO, NULL, NULL);
             SendMessage(hC, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            /* Helper lambda via macro: add item + store button index in data */
 #define ADD_ITEM(str, bidx) { \
     int _i = (int)SendMessageA(hC, CB_ADDSTRING, 0, (LPARAM)(str)); \
     SendMessageA(hC, CB_SETITEMDATA, _i, (LPARAM)(bidx)); }
